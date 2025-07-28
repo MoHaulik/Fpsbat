@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Portal Shooter - WebXR AR FPS (Fixed)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+      background: #000;
+    }
+    #startButton {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 20px 40px;
+      font-size: 24px;
+      background: #ff4444;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: white;
+      font-size: 16px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px;
+      border-radius: 5px;
+    }
+    #debug {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      color: yellow;
+      font-size: 12px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px;
+      border-radius: 5px;
+      max-width: 300px;
+    }
+  </style>
+</head>
+<body>
+  <button id="startButton">Start AR Shooter</button>
+  <div id="info" style="display: none;">
+    Score: <span id="score">0</span> | Health: <span id="health">100</span>
+  </div>
+  <div id="debug">Loading...</div>
+
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
+    import { GLTFLoader } from 'https://unpkg.com/three@0.150.1/examples/jsm/loaders/GLTFLoader.js';
+
+    let camera, scene, renderer;
+    let controller;
+    let raycaster;
+    let portalVideoTexture = null;
+    let portalVideo = null;
+    let gltfLoader;
+    
+    // Fixed model loading approach (like Crystal Runner)
+    let batGeometry = null;
+    let batMaterial = null;
+    let modelLoaded = false;
+    let modelLoadAttempted = false;
+    
+    // Game state
+    let score = 0;
+    let health = 100;
+    let portals = [];
+    let enemies = [];
+    let bullets = [];
+    let lastPortalTime = 0;
+    let portalInterval = 5000;
+    
+    // Debug function
+    function debug(msg) {
+      console.log(msg);
+      document.getElementById('debug').innerHTML += msg + '<br>';
+    }
+    
+    init();
+
+    function init() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // Lighting
+      const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+      scene.add(light);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      directionalLight.position.set(1, 1, 1);
+      scene.add(directionalLight);
+
+      raycaster = new THREE.Raycaster();
+      gltfLoader = new GLTFLoader();
+      
+      // Load bat model with improved approach
+      loadBatModel();
+      setupVideoTexture();
+
+      document.getElementById('startButton').addEventListener('click', () => {
+        navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures: ['local-floor'],
+          optionalFeatures: ['dom-overlay'],
+          domOverlay: { root: document.body }
+        }).then(onSessionStarted).catch(err => {
+          debug('XR Session failed: ' + err.message);
+        });
+      });
+    }
+
+    // Fixed model loading approach (similar to Crystal Runner)
+    async function loadBatModel() {
+      debug('Attempting to load bat.glb...');
+      modelLoadAttempted = true;
+      
+      const batPaths = ['./bat.glb', 'bat.glb', './assets/bat.glb'];
+      
+      for (const path of batPaths) {
+        try {
+          debug(`Trying path: ${path}`);
+          
+          const gltf = await new Promise((resolve, reject) => {
+            gltfLoader.load(path, resolve, null, reject);
+          });
+          
+          debug('Bat model loaded successfully!');
+          
+          // Extract geometry and material (like Crystal Runner)
+          gltf.scene.traverse((child) => {
+            if (child.isMesh && !batGeometry) {
+              batGeometry = child.geometry;
+              batMaterial = child.material;
+              
+              // Ensure proper shadow settings
+              if (batMaterial) {
+                batMaterial.castShadow = true;
+                batMaterial.receiveShadow = true;
+              }
+            }
+          });
+          
+          if (batGeometry && batMaterial) {
+            modelLoaded = true;
+            debug('Bat model geometry and material extracted successfully');
+            return; // Success, exit function
+          }
+          
+        } catch (error) {
+          debug(`Path ${path} failed: ${error.message}`);
+          continue; // Try next path
+        }
+      }
+      
+      // If all paths failed, create fallback
+      debug('All bat.glb paths failed - using fallback');
+      createFallbackBatModel();
+    }
+
+    function createFallbackBatModel() {
+      debug('Creating fallback bat model');
+      
+      // Create simple geometry and material as fallback
+      batGeometry = new THREE.BoxGeometry(0.2, 0.1, 0.4);
+      batMaterial = new THREE.MeshPhongMaterial({ color: 0x2a2a2a });
+      
+      modelLoaded = true;
+      debug('Fallback bat model created');
+    }
+
+    function setupVideoTexture() {
+      debug('Setting up video texture...');
+      portalVideo = document.createElement('video');
+      portalVideo.loop = true;
+      portalVideo.muted = true;
+      portalVideo.playsInline = true;
+      portalVideo.crossOrigin = "anonymous";
+      portalVideo.src = 'video-background.mp4';
+      portalVideo.style.cssText = 'display:block;width:1px;height:1px;position:absolute;opacity:0.01';
+      document.body.appendChild(portalVideo);
+      
+      portalVideoTexture = new THREE.VideoTexture(portalVideo);
+      portalVideoTexture.minFilter = THREE.LinearFilter;
+      portalVideoTexture.magFilter = THREE.LinearFilter;
+      portalVideo.load();
+      debug('Video texture setup complete');
+    }
+
+    function onSessionStarted(session) {
+      debug('AR Session started');
+      document.getElementById('startButton').style.display = 'none';
+      document.getElementById('info').style.display = 'block';
+      
+      renderer.xr.setSession(session);
+
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('select', onSelect);
+      scene.add(controller);
+
+      const geometry = new THREE.CylinderGeometry(0.01, 0.02, 0.08, 5);
+      geometry.rotateX(-Math.PI / 2);
+      const material = new THREE.MeshPhysicalMaterial({
+        color: 0x444444,
+        roughness: 0.6,
+        metalness: 0.8
+      });
+      const gun = new THREE.Mesh(geometry, material);
+      gun.position.z = -0.05;
+      controller.add(gun);
+
+      if (portalVideo) {
+        portalVideo.play().then(() => {
+          debug('Portal video started playing');
+        }).catch(err => {
+          debug('Video play failed: ' + err.message);
+        });
+      }
+
+      renderer.setAnimationLoop(render);
+    }
+
+    function createPortal() {
+      debug('Creating portal...');
+      const portal = new THREE.Group();
+      
+      // Portal ring - transparent
+      const ringGeometry = new THREE.TorusGeometry(0.5, 0.05, 8, 20);
+      const ringMaterial = new THREE.MeshBasicMaterial({ 
+        transparent: true,
+        opacity: 0
+      });
+      const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+      portal.add(ring);
+
+      // Portal surface with video texture
+      const portalGeometry = new THREE.CircleGeometry(0.45, 32);
+      const portalMaterial = new THREE.MeshBasicMaterial({
+        map: portalVideoTexture,
+        transparent: true,
+        opacity: 0.85,
+        side: THREE.DoubleSide
+      });
+      const portalMesh = new THREE.Mesh(portalGeometry, portalMaterial);
+      portal.add(portalMesh);
+
+      // Dark overlay
+      const overlayGeometry = new THREE.CircleGeometry(0.45, 32);
+      const overlayMaterial = new THREE.MeshBasicMaterial({
+        color: 0x001122,
+        transparent: true,
+        opacity: 0.3,
+        side: THREE.DoubleSide
+      });
+      const overlay = new THREE.Mesh(overlayGeometry, overlayMaterial);
+      overlay.position.z = 0.001;
+      portal.add(overlay);
+
+      portal.position.set(
+        (Math.random() - 0.5) * 3,
+        1.5,
+        -2 - Math.random() * 2
+      );
+
+      portal.userData = {
+        spawnTime: Date.now(),
+        lifetime: 8000,
+        enemiesSpawned: false
+      };
+
+      scene.add(portal);
+      portals.push(portal);
+
+      setTimeout(() => {
+        if (portals.includes(portal)) {
+          spawnEnemiesFromPortal(portal);
+          portal.userData.enemiesSpawned = true;
+        }
+      }, 1000);
+      
+      debug('Portal created');
+    }
+
+    function spawnEnemiesFromPortal(portal) {
+      debug('Spawning enemies from portal...');
+      const numEnemies = 2 + Math.floor(Math.random() * 3);
+      
+      for (let i = 0; i < numEnemies; i++) {
+        let enemy;
+        
+        // Use loaded model geometry and material efficiently
+        if (modelLoaded && batGeometry && batMaterial) {
+          debug('Using loaded bat model geometry');
+          enemy = new THREE.Mesh(batGeometry, batMaterial.clone()); // Clone material to allow individual modifications
+          enemy.scale.set(0.3, 0.3, 0.3);
+          enemy.castShadow = true;
+          enemy.receiveShadow = true;
+        } else {
+          debug('Using fallback enemy model');
+          enemy = new THREE.Group();
+          
+          const bodyGeometry = new THREE.BoxGeometry(0.2, 0.4, 0.1);
+          const bodyMaterial = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+          const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+          body.castShadow = true;
+          body.receiveShadow = true;
+          enemy.add(body);
+
+          const headGeometry = new THREE.SphereGeometry(0.1);
+          const headMaterial = new THREE.MeshPhongMaterial({ color: 0xffaa00 });
+          const head = new THREE.Mesh(headGeometry, headMaterial);
+          head.position.y = 0.3;
+          head.castShadow = true;
+          head.receiveShadow = true;
+          enemy.add(head);
+        }
+
+        // Position enemy near portal
+        enemy.position.copy(portal.position);
+        enemy.position.x += (Math.random() - 0.5) * 0.5;
+        enemy.position.y += (Math.random() - 0.5) * 0.3;
+        
+        enemy.userData = {
+          health: 2,
+          speed: 0.5,
+          lastShot: 0,
+          wingFlap: 0,
+          isModelLoaded: modelLoaded && batGeometry && batMaterial
+        };
+
+        scene.add(enemy);
+        enemies.push(enemy);
+      }
+      
+      debug(`Spawned ${numEnemies} enemies`);
+    }
+
+    function onSelect() {
+      const bullet = new THREE.Mesh(
+        new THREE.SphereGeometry(0.02),
+        new THREE.MeshBasicMaterial({ color: 0xffff00 })
+      );
+
+      bullet.position.setFromMatrixPosition(controller.matrixWorld);
+      const direction = new THREE.Vector3(0, 0, -1);
+      direction.applyQuaternion(controller.quaternion);
+      
+      bullet.userData = {
+        velocity: direction.multiplyScalar(10),
+        life: 2
+      };
+
+      scene.add(bullet);
+      bullets.push(bullet);
+
+      const flash = new THREE.PointLight(0xffff00, 2, 0.5);
+      flash.position.setFromMatrixPosition(controller.matrixWorld);
+      scene.add(flash);
+      setTimeout(() => scene.remove(flash), 100);
+    }
+
+    function updateBullets(delta) {
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const bullet = bullets[i];
+        
+        bullet.position.add(bullet.userData.velocity.clone().multiplyScalar(delta));
+        bullet.userData.life -= delta;
+        
+        if (bullet.userData.life <= 0) {
+          scene.remove(bullet);
+          bullets.splice(i, 1);
+          continue;
+        }
+
+        for (let j = enemies.length - 1; j >= 0; j--) {
+          const enemy = enemies[j];
+          if (bullet.position.distanceTo(enemy.position) < 0.3) {
+            enemy.userData.health--;
+            
+            if (enemy.userData.health <= 0) {
+              score += 10;
+              updateUI();
+              scene.remove(enemy);
+              enemies.splice(j, 1);
+            }
+            
+            scene.remove(bullet);
+            bullets.splice(i, 1);
+            break;
+          }
+        }
+      }
+    }
+
+    function updateEnemies(delta) {
+      enemies.forEach(enemy => {
+        enemy.userData.wingFlap += delta * 8;
+        enemy.position.y += Math.sin(enemy.userData.wingFlap) * delta * 0.3;
+        enemy.position.x += Math.sin(Date.now() * 0.001) * delta * 0.4;
+        
+        // Simple rotation animation for all enemies
+        enemy.rotation.x += delta * 0.5;
+        enemy.rotation.y += delta * 0.3;
+        
+        enemy.lookAt(camera.position);
+        
+        if (Date.now() - enemy.userData.lastShot > 3000) {
+          enemy.userData.lastShot = Date.now();
+          
+          const enemyBullet = new THREE.Mesh(
+            new THREE.SphereGeometry(0.02),
+            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+          );
+          
+          enemyBullet.position.copy(enemy.position);
+          const direction = new THREE.Vector3();
+          direction.subVectors(camera.position, enemy.position).normalize();
+          
+          enemyBullet.userData = {
+            velocity: direction.multiplyScalar(3),
+            life: 3,
+            isEnemyBullet: true
+          };
+          
+          scene.add(enemyBullet);
+          bullets.push(enemyBullet);
+        }
+      });
+    }
+
+    function updatePortals(delta) {
+      const now = Date.now();
+      
+      for (let i = portals.length - 1; i >= 0; i--) {
+        const portal = portals[i];
+        if (now - portal.userData.spawnTime > portal.userData.lifetime) {
+          scene.remove(portal);
+          portals.splice(i, 1);
+        } else {
+          portal.children[0].rotation.z += delta * 2;
+        }
+      }
+      
+      if (now - lastPortalTime > portalInterval) {
+        createPortal();
+        lastPortalTime = now;
+      }
+    }
+
+    function checkPlayerHits() {
+      bullets.forEach((bullet, index) => {
+        if (bullet.userData.isEnemyBullet) {
+          if (bullet.position.distanceTo(camera.position) < 0.3) {
+            health -= 10;
+            updateUI();
+            
+            if (health <= 0) {
+              health = 0;
+              updateUI();
+              setTimeout(() => {
+                health = 100;
+                score = 0;
+                updateUI();
+              }, 3000);
+            }
+            
+            scene.remove(bullet);
+            bullets.splice(index, 1);
+          }
+        }
+      });
+    }
+
+    function updateUI() {
+      document.getElementById('score').textContent = score;
+      document.getElementById('health').textContent = health;
+    }
+
+    function render(time, frame) {
+      const delta = Math.min(0.1, time * 0.001 - (window.lastTime || 0));
+      window.lastTime = time * 0.001;
+      
+      if (frame) {
+        updatePortals(delta);
+        updateBullets(delta);
+        updateEnemies(delta);
+        checkPlayerHits();
+        
+        if (portalVideoTexture && portalVideo && portalVideo.readyState >= portalVideo.HAVE_CURRENT_DATA) {
+          portalVideoTexture.needsUpdate = true;
+        }
+      }
+      
+      renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
